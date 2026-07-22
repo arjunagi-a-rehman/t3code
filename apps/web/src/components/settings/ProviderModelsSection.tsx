@@ -23,6 +23,7 @@ import { sortModelsForProviderInstance } from "../../modelOrdering";
 import { MAX_CUSTOM_MODEL_LENGTH } from "../../modelSelection";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
 /**
@@ -36,6 +37,19 @@ const CUSTOM_MODEL_PLACEHOLDER_BY_KIND: Partial<Record<ProviderDriverKind, strin
   [ProviderDriverKind.make("cursor")]: "claude-sonnet-4-6",
   [ProviderDriverKind.make("opencode")]: "openai/gpt-5",
 };
+
+const ALL_PROVIDERS_FILTER = "all";
+
+/**
+ * Group key for the sub-provider filter. Probe-reported slugs are
+ * `providerID/modelID` (e.g. `openai/gpt-5`); anything else falls back to
+ * the empty key rendered as "Other". Custom models are excluded from
+ * grouping — they only show under "All providers".
+ */
+function subProviderKeyForModel(model: ServerProviderModel): string {
+  const separator = model.slug.indexOf("/");
+  return separator > 0 ? model.slug.slice(0, separator) : "";
+}
 
 interface ProviderModelsSectionProps {
   /** Identifier used to namespace input ids within the DOM. */
@@ -99,6 +113,7 @@ export function ProviderModelsSection({
 }: ProviderModelsSectionProps) {
   const [input, setInput] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [providerFilter, setProviderFilter] = useState<string>(ALL_PROVIDERS_FILTER);
   const listRef = useRef<HTMLDivElement | null>(null);
   const hiddenModelSet = useMemo(() => new Set(hiddenModels), [hiddenModels]);
   const favoriteModelSet = useMemo(() => new Set(favoriteModels), [favoriteModels]);
@@ -109,6 +124,47 @@ export function ProviderModelsSection({
       modelOrder,
     });
   }, [favoriteModelSet, modelOrder, models]);
+
+  const subProviderGroups = useMemo(() => {
+    const groups = new Map<string, { label: string; count: number }>();
+    for (const model of models) {
+      if (model.isCustom) continue;
+      const key = subProviderKeyForModel(model);
+      const label = model.subProvider ?? (key.length > 0 ? key : "Other");
+      const existing = groups.get(key);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        groups.set(key, { label, count: 1 });
+      }
+    }
+    return [...groups.entries()]
+      .map(([key, group]) => ({ key, ...group }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [models]);
+
+  const effectiveProviderFilter =
+    providerFilter !== ALL_PROVIDERS_FILTER &&
+    subProviderGroups.some((group) => group.key === providerFilter)
+      ? providerFilter
+      : ALL_PROVIDERS_FILTER;
+
+  const visibleModels = useMemo(() => {
+    if (effectiveProviderFilter === ALL_PROVIDERS_FILTER) {
+      return orderedModels;
+    }
+    return orderedModels.filter(
+      (model) => !model.isCustom && subProviderKeyForModel(model) === effectiveProviderFilter,
+    );
+  }, [effectiveProviderFilter, orderedModels]);
+
+  const visibleHidableModels = useMemo(
+    () => visibleModels.filter((model) => !model.isCustom),
+    [visibleModels],
+  );
+  const allVisibleHidden =
+    visibleHidableModels.length > 0 &&
+    visibleHidableModels.every((model) => hiddenModelSet.has(model.slug));
 
   const handleAdd = () => {
     const normalized = normalizeCustomModelSlug(input);
@@ -164,6 +220,19 @@ export function ProviderModelsSection({
     onHiddenModelsChange([...hiddenModels, slug]);
   };
 
+  const handleHideAllVisible = () => {
+    const additions = visibleHidableModels
+      .map((model) => model.slug)
+      .filter((slug) => !hiddenModelSet.has(slug));
+    if (additions.length === 0) return;
+    onHiddenModelsChange([...hiddenModels, ...additions]);
+  };
+
+  const handleShowAllVisible = () => {
+    const visibleSlugs = new Set(visibleHidableModels.map((model) => model.slug));
+    onHiddenModelsChange(hiddenModels.filter((slug) => !visibleSlugs.has(slug)));
+  };
+
   const handleToggleFavorite = (slug: string) => {
     if (favoriteModelSet.has(slug)) {
       onFavoriteModelsChange(favoriteModels.filter((model) => model !== slug));
@@ -189,19 +258,84 @@ export function ProviderModelsSection({
       <div className="text-xs font-medium text-foreground">Models</div>
       <div className="mt-1 text-xs text-muted-foreground">
         {models.length} model{models.length === 1 ? "" : "s"} available.
+        {effectiveProviderFilter !== ALL_PROVIDERS_FILTER
+          ? ` Showing ${visibleModels.length}.`
+          : null}
       </div>
+      {subProviderGroups.length > 1 || visibleHidableModels.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {subProviderGroups.length > 1 ? (
+            <Select
+              value={effectiveProviderFilter}
+              onValueChange={(value) => {
+                if (value !== null) setProviderFilter(value);
+              }}
+            >
+              <SelectTrigger
+                size="xs"
+                className="w-full sm:w-44"
+                aria-label="Filter models by provider"
+              >
+                <SelectValue>
+                  {effectiveProviderFilter === ALL_PROVIDERS_FILTER
+                    ? "All providers"
+                    : (subProviderGroups.find((group) => group.key === effectiveProviderFilter)
+                        ?.label ?? effectiveProviderFilter)}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value={ALL_PROVIDERS_FILTER}>
+                  All providers
+                </SelectItem>
+                {subProviderGroups.map((group) => (
+                  <SelectItem hideIndicator key={group.key} value={group.key}>
+                    {group.label} ({group.count})
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : null}
+          {visibleHidableModels.length > 0 ? (
+            <div className="flex items-center gap-1">
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={allVisibleHidden}
+                onClick={handleHideAllVisible}
+              >
+                <EyeOffIcon className="size-3" />
+                Hide all
+              </Button>
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={!visibleHidableModels.some((model) => hiddenModelSet.has(model.slug))}
+                onClick={handleShowAllVisible}
+              >
+                <EyeIcon className="size-3" />
+                Show all
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div ref={listRef} className="mt-2 max-h-40 overflow-y-auto pb-1">
-        {orderedModels.map((model, index) => {
+        {visibleModels.map((model, index) => {
           const caps = model.capabilities;
           const capLabels: string[] = [];
           const isHidden = !model.isCustom && hiddenModelSet.has(model.slug);
           const isFavorite = favoriteModelSet.has(model.slug);
-          const previousModel = orderedModels[index - 1];
-          const nextModel = orderedModels[index + 1];
+          const isFiltered = effectiveProviderFilter !== ALL_PROVIDERS_FILTER;
+          const previousModel = visibleModels[index - 1];
+          const nextModel = visibleModels[index + 1];
           const canMoveUp =
-            previousModel !== undefined && favoriteModelSet.has(previousModel.slug) === isFavorite;
+            !isFiltered &&
+            previousModel !== undefined &&
+            favoriteModelSet.has(previousModel.slug) === isFavorite;
           const canMoveDown =
-            nextModel !== undefined && favoriteModelSet.has(nextModel.slug) === isFavorite;
+            !isFiltered &&
+            nextModel !== undefined &&
+            favoriteModelSet.has(nextModel.slug) === isFavorite;
           const descriptors = caps?.optionDescriptors ?? [];
           if (descriptors.some((descriptor) => descriptor.id === "fastMode")) {
             capLabels.push("Fast mode");
@@ -269,6 +403,13 @@ export function ProviderModelsSection({
                       </div>
                     </TooltipPopup>
                   </Tooltip>
+                ) : null}
+                {subProviderGroups.length > 1 &&
+                !model.isCustom &&
+                effectiveProviderFilter === ALL_PROVIDERS_FILTER ? (
+                  <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                    {model.subProvider ?? subProviderKeyForModel(model)}
+                  </span>
                 ) : null}
                 {isHidden ? (
                   <span className="text-[10px] text-muted-foreground">hidden</span>
