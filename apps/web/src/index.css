@@ -537,6 +537,40 @@ body {
   overscroll-behavior-y: none;
   padding-top: max(env(safe-area-inset-top), 0px);
   padding-right: var(--desktop-window-right-resize-inset);
+  /* Stacking context so the custom background image layer (-z-10) paints above
+     the propagated body/canvas background but below all shell content. */
+  position: relative;
+  z-index: 0;
+}
+
+/* Custom app background image. When one is set, AppBackgroundImage marks
+   <html data-app-background-image="true"> and renders a fixed image layer
+   behind the shell; the shell's opaque surfaces relax to a translucent scrim
+   so the image shows through. */
+:root {
+  --app-background-scrim-opacity: 76%;
+}
+
+html[data-app-background-image="true"] [data-slot="sidebar-wrapper"] {
+  background-color: transparent;
+}
+
+html[data-app-background-image="true"] [data-slot="sidebar-container"],
+html[data-app-background-image="true"] [data-slot="sidebar-inner"] {
+  background-color: color-mix(
+    in srgb,
+    var(--card) var(--app-background-scrim-opacity),
+    transparent
+  );
+}
+
+html[data-app-background-image="true"] [data-slot="sidebar-inset"],
+html[data-app-background-image="true"] [data-slot="sidebar-inset"] .bg-background {
+  background-color: color-mix(
+    in srgb,
+    var(--background) var(--app-background-scrim-opacity),
+    transparent
+  );
 }
 
 .electron-windows {
