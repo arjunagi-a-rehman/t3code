@@ -25,6 +25,7 @@ import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
+import { imageFileToBackgroundDataUrl } from "../../backgroundImage";
 import {
   canCheckForUpdate,
   getDesktopUpdateButtonTooltip,
@@ -389,6 +390,12 @@ export function useSettingsRestore(onRestored?: () => void) {
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
+      ...(settings.backgroundImage !== DEFAULT_UNIFIED_SETTINGS.backgroundImage
+        ? ["Background image"]
+        : []),
+      ...(settings.backgroundImageOpacity !== DEFAULT_UNIFIED_SETTINGS.backgroundImageOpacity
+        ? ["Background opacity"]
+        : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
@@ -434,6 +441,8 @@ export function useSettingsRestore(onRestored?: () => void) {
     [
       isGitWritingModelDirty,
       settings.autoOpenPlanSidebar,
+      settings.backgroundImage,
+      settings.backgroundImageOpacity,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.addProjectBaseDirectory,
@@ -462,6 +471,8 @@ export function useSettingsRestore(onRestored?: () => void) {
 
     setTheme("system");
     updateSettings({
+      backgroundImage: DEFAULT_UNIFIED_SETTINGS.backgroundImage,
+      backgroundImageOpacity: DEFAULT_UNIFIED_SETTINGS.backgroundImageOpacity,
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
       wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
@@ -490,6 +501,8 @@ export function GeneralSettingsPanel() {
   const { theme, setTheme } = useTheme();
   const settings = usePrimarySettings();
   const updateSettings = useUpdatePrimarySettings();
+  const backgroundImageInputRef = useRef<HTMLInputElement>(null);
+  const [isBackgroundImageUploading, setIsBackgroundImageUploading] = useState(false);
   const observability = useAtomValue(primaryServerObservabilityAtom);
   const serverProviders = useAtomValue(primaryServerProvidersAtom);
   const diagnosticsDescription = formatDiagnosticsDescription({
@@ -521,6 +534,28 @@ export function GeneralSettingsPanel() {
   const isGitWritingModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  );
+
+  const handleBackgroundImageFile = useCallback(
+    async (file: File | undefined) => {
+      if (!file) return;
+      setIsBackgroundImageUploading(true);
+      try {
+        const dataUrl = await imageFileToBackgroundDataUrl(file);
+        updateSettings({ backgroundImage: dataUrl });
+      } catch (error) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Unable to set background image",
+            description: error instanceof Error ? error.message : "Unknown error reading image.",
+          }),
+        );
+      } finally {
+        setIsBackgroundImageUploading(false);
+      }
+    },
+    [updateSettings],
   );
 
   return (
@@ -558,6 +593,113 @@ export function GeneralSettingsPanel() {
             </Select>
           }
         />
+
+        <SettingsRow
+          title="Background image"
+          description="Show a custom image behind the app. Stored on this device only."
+          resetAction={
+            settings.backgroundImage !== DEFAULT_UNIFIED_SETTINGS.backgroundImage ? (
+              <SettingResetButton
+                label="background image"
+                onClick={() =>
+                  updateSettings({
+                    backgroundImage: DEFAULT_UNIFIED_SETTINGS.backgroundImage,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex items-center gap-2">
+              <input
+                ref={backgroundImageInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={(event) => {
+                  void handleBackgroundImageFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+              {settings.backgroundImage ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    updateSettings({
+                      backgroundImage: DEFAULT_UNIFIED_SETTINGS.backgroundImage,
+                    })
+                  }
+                >
+                  Remove
+                </Button>
+              ) : null}
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={isBackgroundImageUploading}
+                onClick={() => backgroundImageInputRef.current?.click()}
+              >
+                {isBackgroundImageUploading
+                  ? "Uploading…"
+                  : settings.backgroundImage
+                    ? "Change"
+                    : "Upload"}
+              </Button>
+            </div>
+          }
+        >
+          {settings.backgroundImage ? (
+            <div className="pb-3.5">
+              <img
+                src={settings.backgroundImage}
+                alt="Background image preview"
+                className="h-24 w-auto rounded-lg border border-border/60 object-cover"
+              />
+            </div>
+          ) : null}
+        </SettingsRow>
+
+        {settings.backgroundImage ? (
+          <SettingsRow
+            title="Background opacity"
+            description="Control how strongly the background image shows through the app."
+            resetAction={
+              settings.backgroundImageOpacity !==
+              DEFAULT_UNIFIED_SETTINGS.backgroundImageOpacity ? (
+                <SettingResetButton
+                  label="background opacity"
+                  onClick={() =>
+                    updateSettings({
+                      backgroundImageOpacity: DEFAULT_UNIFIED_SETTINGS.backgroundImageOpacity,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <div className="flex items-center gap-2.5">
+                <input
+                  type="range"
+                  min={5}
+                  max={100}
+                  step={5}
+                  value={Math.round(settings.backgroundImageOpacity * 100)}
+                  onChange={(event) =>
+                    updateSettings({
+                      backgroundImageOpacity: Number(event.target.value) / 100,
+                    })
+                  }
+                  className="w-full accent-primary sm:w-44"
+                  aria-label="Background image opacity"
+                />
+                <span className="w-9 text-right text-xs tabular-nums text-muted-foreground">
+                  {Math.round(settings.backgroundImageOpacity * 100)}%
+                </span>
+              </div>
+            }
+          />
+        ) : null}
 
         <SettingsRow
           title="Time format"

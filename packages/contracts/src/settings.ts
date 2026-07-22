@@ -49,8 +49,25 @@ export const SidebarAutoSettleAfterDays = Schema.Number.check(
 export type SidebarAutoSettleAfterDays = typeof SidebarAutoSettleAfterDays.Type;
 export const DEFAULT_SIDEBAR_AUTO_SETTLE_AFTER_DAYS: SidebarAutoSettleAfterDays = 3;
 
+export const MIN_BACKGROUND_IMAGE_OPACITY = 0.05;
+export const MAX_BACKGROUND_IMAGE_OPACITY = 1;
+export const BackgroundImageOpacity = Schema.Number.check(
+  Schema.isBetween({
+    minimum: MIN_BACKGROUND_IMAGE_OPACITY,
+    maximum: MAX_BACKGROUND_IMAGE_OPACITY,
+  }),
+);
+export type BackgroundImageOpacity = typeof BackgroundImageOpacity.Type;
+export const DEFAULT_BACKGROUND_IMAGE_OPACITY: BackgroundImageOpacity = 0.5;
+
 export const ClientSettingsSchema = Schema.Struct({
   autoOpenPlanSidebar: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  backgroundImage: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  backgroundImageOpacity: BackgroundImageOpacity.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_BACKGROUND_IMAGE_OPACITY)),
+  ),
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
@@ -557,6 +574,8 @@ export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 
 export const ClientSettingsPatch = Schema.Struct({
   autoOpenPlanSidebar: Schema.optionalKey(Schema.Boolean),
+  backgroundImage: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  backgroundImageOpacity: Schema.optionalKey(BackgroundImageOpacity),
   confirmThreadArchive: Schema.optionalKey(Schema.Boolean),
   confirmThreadDelete: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
