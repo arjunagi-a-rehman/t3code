@@ -84,6 +84,7 @@ import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
@@ -558,14 +559,33 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ServerSettings.ServerSettingsService)({
-          start: Effect.void,
-          ready: Effect.void,
-          getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-          streamChanges: Stream.empty,
-          ...options?.layers?.serverSettings,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ServerSettings.ServerSettingsService)({
+            start: Effect.void,
+            ready: Effect.void,
+            getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+            streamChanges: Stream.empty,
+            ...options?.layers?.serverSettings,
+          }),
+          Layer.succeed(OpenCodeRuntime.OpenCodeRuntime, {
+            startOpenCodeServerProcess: () =>
+              Effect.die("OpenCodeRuntime.startOpenCodeServerProcess not stubbed in this test"),
+            connectToOpenCodeServer: () =>
+              Effect.die("OpenCodeRuntime.connectToOpenCodeServer not stubbed in this test"),
+            runOpenCodeCommand: () =>
+              Effect.die("OpenCodeRuntime.runOpenCodeCommand not stubbed in this test"),
+            createOpenCodeSdkClient: () =>
+              ({}) as unknown as ReturnType<
+                OpenCodeRuntime.OpenCodeRuntimeShape["createOpenCodeSdkClient"]
+              >,
+            loadOpenCodeInventory: () =>
+              Effect.die("OpenCodeRuntime.loadOpenCodeInventory not stubbed in this test"),
+            listOpenCodeCommands: () => Effect.succeed([]),
+            loadInventoryFromCli: () =>
+              Effect.die("OpenCodeRuntime.loadInventoryFromCli not stubbed in this test"),
+          } satisfies OpenCodeRuntime.OpenCodeRuntimeShape),
+        ),
       ),
       Layer.provide(
         Layer.mock(ExternalLauncher.ExternalLauncher)({

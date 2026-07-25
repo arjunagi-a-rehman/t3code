@@ -1,17 +1,23 @@
+import * as NodeOS from "node:os";
+
 import {
   type ModelCapabilities,
   type OpenCodeSettings,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
+  dedupeSlashCommands,
   nonEmptyTrimmed,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -22,7 +28,7 @@ import {
   openCodeRuntimeErrorDetail,
   type OpenCodeInventory,
 } from "../opencodeRuntime.ts";
-import type { Agent, ProviderListResponse } from "@opencode-ai/sdk/v2";
+import type { Agent, Command as OpenCodeCommand, ProviderListResponse } from "@opencode-ai/sdk/v2";
 
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
@@ -250,6 +256,124 @@ function flattenOpenCodeModels(input: OpenCodeInventory): ReadonlyArray<ServerPr
   return models.toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
+export function openCodeCommandToSlashCommand(
+  command: OpenCodeCommand,
+): ServerProviderSlashCommand | undefined {
+  const name = nonEmptyTrimmed(command.name);
+  if (!name) {
+    return undefined;
+  }
+  const description = nonEmptyTrimmed(command.description);
+  const hint = command.hints.map((entry) => entry.trim()).find((entry) => entry.length > 0);
+  return {
+    name,
+    ...(description ? { description } : {}),
+    ...(hint ? { input: { hint } } : {}),
+  };
+}
+
+/**
+ * Extract the `description` frontmatter field from an OpenCode markdown
+ * command file. Frontmatter is a leading `---` block of simple `key: value`
+ * lines; anything else (or none) yields no description.
+ */
+function parseOpenCodeCommandMarkdownDescription(content: string): string | undefined {
+  const frontmatter = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!frontmatter?.[1]) {
+    return undefined;
+  }
+  const match = frontmatter[1].match(/^description:\s*(\S.*?)\s*$/m);
+  if (!match?.[1]) {
+    return undefined;
+  }
+  const description = match[1].replace(/^["']|["']$/g, "");
+  return description.length > 0 ? description : undefined;
+}
+
+const scanOpenCodeCommandDirectory = (
+  directory: string,
+): Effect.Effect<ReadonlyArray<ServerProviderSlashCommand>, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const entries = yield* fileSystem.readDirectory(directory);
+    const commands: Array<ServerProviderSlashCommand> = [];
+    for (const entry of entries.toSorted()) {
+      if (!entry.toLowerCase().endsWith(".md")) {
+        continue;
+      }
+      const name = nonEmptyTrimmed(entry.slice(0, -".md".length));
+      if (!name) {
+        continue;
+      }
+      const content = yield* fileSystem
+        .readFileString(`${directory}/${entry}`)
+        .pipe(Effect.orElseSucceed(() => ""));
+      const description = parseOpenCodeCommandMarkdownDescription(content);
+      commands.push({ name, ...(description ? { description } : {}) });
+    }
+    return commands;
+  }).pipe(Effect.orElseSucceed((): ReadonlyArray<ServerProviderSlashCommand> => []));
+
+/**
+ * Project-scoped markdown command discovery: `<cwd>/.opencode/command(s)/*.md`.
+ * (`command` is the canonical directory name; `commands` is scanned
+ * defensively.) Exposed separately from the global scan so the
+ * project-slash-commands RPC can report only the commands a specific
+ * working directory adds on top of the provider snapshot.
+ */
+export const discoverProjectOpenCodeSlashCommands = (
+  cwd: string,
+): Effect.Effect<
+  ReadonlyArray<ServerProviderSlashCommand>,
+  never,
+  FileSystem.FileSystem | Path.Path
+> =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const directories = [
+      path.join(cwd, ".opencode", "command"),
+      path.join(cwd, ".opencode", "commands"),
+    ];
+    const scanned = yield* Effect.forEach(directories, scanOpenCodeCommandDirectory, {
+      concurrency: "unbounded",
+    });
+    return scanned.flat();
+  });
+
+/**
+ * Local-mode slash-command discovery. The CLI health check has no server to
+ * ask, so custom commands are read from the same markdown files OpenCode
+ * itself loads: `<config>/opencode/command(s)/*.md` globally and
+ * `<cwd>/.opencode/command(s)/*.md` per project. Built-in commands
+ * (`/init`, `/undo`, …) are server-reported and therefore only appear when
+ * an external server is configured.
+ */
+const discoverLocalOpenCodeSlashCommands = (
+  cwd: string,
+  environment: NodeJS.ProcessEnv,
+): Effect.Effect<
+  ReadonlyArray<ServerProviderSlashCommand>,
+  never,
+  FileSystem.FileSystem | Path.Path
+> =>
+  Effect.gen(function* () {
+    const path = yield* Path.Path;
+    const home =
+      nonEmptyTrimmed(environment.HOME) ??
+      nonEmptyTrimmed(environment.USERPROFILE) ??
+      NodeOS.homedir();
+    const configHome = nonEmptyTrimmed(environment.XDG_CONFIG_HOME) ?? path.join(home, ".config");
+    const directories = [
+      path.join(configHome, "opencode", "command"),
+      path.join(configHome, "opencode", "commands"),
+    ];
+    const scanned = yield* Effect.forEach(directories, scanOpenCodeCommandDirectory, {
+      concurrency: "unbounded",
+    });
+    const projectCommands = yield* discoverProjectOpenCodeSlashCommands(cwd);
+    return [...scanned.flat(), ...projectCommands];
+  });
+
 export const makePendingOpenCodeProvider = (
   openCodeSettings: OpenCodeSettings,
 ): Effect.Effect<ServerProviderDraft> =>
@@ -299,7 +423,11 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
   openCodeSettings: OpenCodeSettings,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
-): Effect.fn.Return<ServerProviderDraft, never, OpenCodeRuntime> {
+): Effect.fn.Return<
+  ServerProviderDraft,
+  never,
+  OpenCodeRuntime | FileSystem.FileSystem | Path.Path
+> {
   const openCodeRuntime = yield* OpenCodeRuntime;
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
@@ -429,12 +557,23 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     customModels,
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,
   );
+  const localSlashCommands = isExternalServer
+    ? []
+    : yield* discoverLocalOpenCodeSlashCommands(cwd, resolvedEnvironment);
+  const slashCommands = dedupeSlashCommands([
+    ...inventoryExit.value.commands.flatMap((command) => {
+      const mapped = openCodeCommandToSlashCommand(command);
+      return mapped ? [mapped] : [];
+    }),
+    ...localSlashCommands,
+  ]);
   const connectedCount = inventoryExit.value.providerList.connected.length;
   return buildServerProvider({
     presentation: OPENCODE_PRESENTATION,
     enabled: true,
     checkedAt,
     models,
+    slashCommands,
     probe: {
       installed: true,
       version,

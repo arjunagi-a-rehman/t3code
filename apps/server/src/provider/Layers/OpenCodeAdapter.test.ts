@@ -65,6 +65,9 @@ const runtimeMock = {
     revertCalls: [] as Array<{ sessionID: string; messageID?: string }>,
     promptCalls: [] as Array<unknown>,
     promptAsyncError: null as Error | null,
+    commandList: [] as Array<{ name: string; description?: string; hints?: string[] }>,
+    commandCalls: [] as Array<Record<string, unknown>>,
+    commandError: null as Error | null,
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
     subscribedEvents: [] as unknown[],
@@ -85,6 +88,9 @@ const runtimeMock = {
     this.state.revertCalls.length = 0;
     this.state.promptCalls.length = 0;
     this.state.promptAsyncError = null;
+    this.state.commandList = [];
+    this.state.commandCalls.length = 0;
+    this.state.commandError = null;
     this.state.closeError = null;
     this.state.messages = [];
     this.state.subscribedEvents = [];
@@ -183,6 +189,12 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
             throw runtimeMock.state.promptAsyncError;
           }
         },
+        command: async (input: Record<string, unknown>) => {
+          runtimeMock.state.commandCalls.push(input);
+          if (runtimeMock.state.commandError) {
+            throw runtimeMock.state.commandError;
+          }
+        },
         messages: async () => ({ data: runtimeMock.state.messages }),
         revert: async ({ sessionID, messageID }: { sessionID: string; messageID?: string }) => {
           runtimeMock.state.revertCalls.push({
@@ -212,6 +224,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           })(),
         }),
       },
+      command: {
+        list: async () => ({ data: runtimeMock.state.commandList }),
+      },
     }) as unknown as ReturnType<OpenCodeRuntimeShape["createOpenCodeSdkClient"]>,
   loadOpenCodeInventory: () =>
     Effect.fail(
@@ -221,6 +236,14 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         cause: null,
       }),
     ),
+  listOpenCodeCommands: () =>
+    Effect.fail(
+      new OpenCodeRuntimeError({
+        operation: "listOpenCodeCommands",
+        detail: "OpenCodeRuntimeTestDouble.listOpenCodeCommands not used in this test",
+        cause: null,
+      }),
+    ).pipe(Effect.orElseSucceed(() => [])),
   loadInventoryFromCli: () =>
     Effect.fail(
       new OpenCodeRuntimeError({
@@ -766,6 +789,137 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.equal(session?.status, "running");
       NodeAssert.equal(String(session?.activeTurnId), String(turn.turnId));
       NodeAssert.equal(runtimeMock.state.promptCalls.length, 2);
+    }),
+  );
+
+  it.effect("routes a matched slash command to session.command instead of promptAsync", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-slash-command");
+      runtimeMock.state.commandList = [
+        { name: "review", description: "Review code", hints: ["files"] },
+      ];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review src/foo.ts",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      NodeAssert.equal(runtimeMock.state.promptCalls.length, 0);
+      NodeAssert.equal(runtimeMock.state.commandCalls.length, 1);
+      const call = runtimeMock.state.commandCalls[0]!;
+      NodeAssert.equal(call.command, "review");
+      NodeAssert.equal(call.arguments, "src/foo.ts");
+      NodeAssert.equal(call.model, "openai/gpt-5");
+      NodeAssert.equal(typeof call.sessionID, "string");
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("matches slash commands case-insensitively and allows empty arguments", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-slash-command-case");
+      runtimeMock.state.commandList = [{ name: "review" }];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/REVIEW",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      NodeAssert.equal(runtimeMock.state.promptCalls.length, 0);
+      NodeAssert.equal(runtimeMock.state.commandCalls.length, 1);
+      const call = runtimeMock.state.commandCalls[0]!;
+      NodeAssert.equal(call.command, "review");
+      NodeAssert.equal(call.arguments, "");
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("falls through to promptAsync for unmatched slash input", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-slash-unmatched");
+      runtimeMock.state.commandList = [{ name: "review" }];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/not-a-command do something",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      NodeAssert.equal(runtimeMock.state.commandCalls.length, 0);
+      NodeAssert.equal(runtimeMock.state.promptCalls.length, 1);
+      const prompt = runtimeMock.state.promptCalls[0] as {
+        parts: Array<{ type: string; text?: string }>;
+      };
+      NodeAssert.equal(prompt.parts[0]?.text, "/not-a-command do something");
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("steers slash-command input as a prompt while a turn is active", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const threadId = asThreadId("thread-slash-steer");
+      runtimeMock.state.commandList = [{ name: "review" }];
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "run 5 commands",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/review src/foo.ts",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "openai/gpt-5",
+        },
+      });
+
+      NodeAssert.equal(runtimeMock.state.commandCalls.length, 0);
+      NodeAssert.equal(runtimeMock.state.promptCalls.length, 2);
+
+      yield* adapter.stopSession(threadId);
     }),
   );
 

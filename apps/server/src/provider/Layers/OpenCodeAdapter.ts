@@ -217,6 +217,15 @@ interface OpenCodeSessionContext {
   readonly emittedTextByPartId: Map<string, string>;
   readonly completedAssistantPartIds: Set<string>;
   readonly turns: Array<OpenCodeTurnSnapshot>;
+  /**
+   * Slash commands available in this session, keyed by lowercase name with
+   * the canonical server-reported name as the value. Populated best-effort
+   * at `startSession`; used by `sendTurn` to route `/name args` input to
+   * `session.command` instead of `session.promptAsync`. The client is
+   * created with the session directory, so the listing is already scoped to
+   * the right project.
+   */
+  readonly slashCommandNames: ReadonlyMap<string, string>;
   activeTurnId: TurnId | undefined;
   activeAgent: string | undefined;
   activeVariant: string | undefined;
@@ -1230,6 +1239,25 @@ export function makeOpenCodeAdapter(
                   }),
                 );
               }
+              // Best-effort slash-command discovery. A failure here (older
+              // server without `GET /command`, transient blip) must not fail
+              // session startup — `/name` input simply falls through to
+              // `promptAsync` as plain text.
+              const slashCommandNames = yield* runOpenCodeSdk("command.list", () =>
+                client.command.list(),
+              ).pipe(
+                Effect.map((result) => {
+                  const names = new Map<string, string>();
+                  for (const command of result.data ?? []) {
+                    const name = command.name?.trim();
+                    if (name && !names.has(name.toLowerCase())) {
+                      names.set(name.toLowerCase(), name);
+                    }
+                  }
+                  return names as ReadonlyMap<string, string>;
+                }),
+                Effect.orElseSucceed((): ReadonlyMap<string, string> => new Map()),
+              );
               // Resume: re-adopt the session named by the durable cursor —
               // OpenCode scopes history by session id. The probe recovers only
               // a confirmed not-found (start fresh); transport/auth/server
@@ -1318,6 +1346,7 @@ export function makeOpenCodeAdapter(
                 sessionScope,
                 server,
                 client,
+                slashCommandNames,
                 openCodeSession: resolved.openCodeSession,
                 created: resolved.created,
               };
@@ -1381,6 +1410,7 @@ export function makeOpenCodeAdapter(
           messageRoleById: new Map(),
           completedAssistantPartIds: new Set(),
           turns: [],
+          slashCommandNames: started.slashCommandNames,
           activeTurnId: undefined,
           activeAgent: undefined,
           activeVariant: undefined,
@@ -1481,14 +1511,42 @@ export function makeOpenCodeAdapter(
         });
       }
 
-      yield* runOpenCodeSdk("session.promptAsync", () =>
-        context.client.session.promptAsync({
-          sessionID: context.openCodeSessionId,
-          model: parsedModel,
-          ...(context.activeAgent ? { agent: context.activeAgent } : {}),
-          ...(context.activeVariant ? { variant: context.activeVariant } : {}),
-          parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
-        }),
+      // Slash-command intercept: a leading `/name args` matching a
+      // server-listed command runs through `session.command` — session
+      // events stream over SSE identically to a prompt, so turn projection
+      // and ingestion are untouched. Only on a fresh turn: mid-turn input is
+      // a steer queued into the busy session, where `session.command` would
+      // be rejected. Unmatched `/name` input keeps the promptAsync path and
+      // is sent as plain text.
+      const slashCommandMatch =
+        steeringTurnId === undefined ? text?.match(/^\/([\w-]+)(?:\s+([\s\S]*))?$/) : undefined;
+      const slashCommandName = slashCommandMatch?.[1]
+        ? context.slashCommandNames.get(slashCommandMatch[1].toLowerCase())
+        : undefined;
+      const modelSlug = modelSelection?.model ?? context.session.model;
+
+      yield* (
+        slashCommandName !== undefined
+          ? runOpenCodeSdk("session.command", () =>
+              context.client.session.command({
+                sessionID: context.openCodeSessionId,
+                command: slashCommandName,
+                arguments: slashCommandMatch?.[2] ?? "",
+                ...(modelSlug ? { model: modelSlug } : {}),
+                ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+                ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+                ...(fileParts.length > 0 ? { parts: fileParts } : {}),
+              }),
+            ).pipe(Effect.asVoid)
+          : runOpenCodeSdk("session.promptAsync", () =>
+              context.client.session.promptAsync({
+                sessionID: context.openCodeSessionId,
+                model: parsedModel,
+                ...(context.activeAgent ? { agent: context.activeAgent } : {}),
+                ...(context.activeVariant ? { variant: context.activeVariant } : {}),
+                parts: [...(text ? [{ type: "text" as const, text }] : []), ...fileParts],
+              }),
+            ).pipe(Effect.asVoid)
       ).pipe(
         Effect.mapError(toRequestError),
         // On failure of a fresh turn: clear active-turn state, flip the

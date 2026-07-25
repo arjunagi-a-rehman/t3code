@@ -3,7 +3,9 @@ import * as NodeAssert from "node:assert/strict";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { beforeEach } from "vite-plus/test";
 
@@ -38,6 +40,7 @@ const runtimeMock = {
     inventory: {
       providerList: { connected: [] as string[], all: [] as unknown[], default: {} },
       agents: [] as unknown[],
+      commands: [] as unknown[],
     } as unknown,
   },
   reset() {
@@ -48,6 +51,7 @@ const runtimeMock = {
     this.state.inventory = {
       providerList: { connected: [], all: [] as unknown[], default: {} },
       agents: [] as unknown[],
+      commands: [] as unknown[],
     };
   },
 };
@@ -95,6 +99,8 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           }),
         )
       : Effect.succeed(runtimeMock.state.inventory as OpenCodeInventory),
+  listOpenCodeCommands: () =>
+    Effect.succeed((runtimeMock.state.inventory as OpenCodeInventory).commands),
   loadInventoryFromCli: () =>
     runtimeMock.state.inventoryError
       ? Effect.fail(
@@ -182,6 +188,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
           { name: "build", hidden: false, mode: "primary" },
           { name: "plan", hidden: false, mode: "primary" },
         ],
+        commands: [],
       };
 
       const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
@@ -229,9 +236,75 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       );
     }),
   );
+
+  it.effect("discovers local markdown slash commands from config and project directories", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const tempRoot = yield* fileSystem.makeTempDirectory();
+      const configHome = path.join(tempRoot, "config");
+      const homeDir = path.join(tempRoot, "home");
+      const projectDir = path.join(tempRoot, "project");
+      yield* fileSystem.makeDirectory(path.join(configHome, "opencode", "command"), {
+        recursive: true,
+      });
+      yield* fileSystem.makeDirectory(path.join(projectDir, ".opencode", "command"), {
+        recursive: true,
+      });
+      yield* fileSystem.writeFileString(
+        path.join(configHome, "opencode", "command", "review.md"),
+        "---\ndescription: Review the given files\nagent: build\n---\n\nReview $ARGUMENTS\n",
+      );
+      yield* fileSystem.writeFileString(
+        path.join(projectDir, ".opencode", "command", "deploy.md"),
+        "Deploy the project. No frontmatter here.\n",
+      );
+      yield* fileSystem.writeFileString(
+        path.join(projectDir, ".opencode", "command", "notes.txt"),
+        "not a command\n",
+      );
+
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), projectDir, {
+        ...process.env,
+        XDG_CONFIG_HOME: configHome,
+        HOME: homeDir,
+      });
+
+      NodeAssert.deepEqual(snapshot.slashCommands, [
+        { name: "review", description: "Review the given files" },
+        { name: "deploy" },
+      ]);
+    }),
+  );
 });
 
 it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (it) => {
+  it.effect("maps server-reported commands into slashCommands and dedupes by name", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.inventory = {
+        providerList: { connected: ["openai"], all: [], default: {} },
+        agents: [],
+        commands: [
+          { name: "review", description: "Review code", hints: ["files"], template: "r" },
+          { name: "init", description: "Initialize project", hints: [], template: "i" },
+          { name: "REVIEW", description: "duplicate", hints: [], template: "r2" },
+        ],
+      };
+      const snapshot = yield* checkOpenCodeProviderStatus(
+        makeOpenCodeSettings({
+          serverUrl: "http://127.0.0.1:9999",
+          serverPassword: "secret-password",
+        }),
+        process.cwd(),
+      );
+
+      NodeAssert.deepEqual(snapshot.slashCommands, [
+        { name: "review", description: "Review code", input: { hint: "files" } },
+        { name: "init", description: "Initialize project" },
+      ]);
+    }),
+  );
+
   it.effect("surfaces a friendly auth error for configured servers", () =>
     Effect.gen(function* () {
       runtimeMock.state.inventoryError = new Error("401 Unauthorized");

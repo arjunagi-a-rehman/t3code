@@ -4,6 +4,7 @@ import type { ChatAttachment, ProviderApprovalDecision, RuntimeMode } from "@t3t
 import {
   createOpencodeClient,
   type Agent,
+  type Command as OpenCodeCommand,
   type FilePartInput,
   type Model,
   type OpencodeClient,
@@ -101,6 +102,7 @@ export interface OpenCodeCommandResult {
 export interface OpenCodeInventory {
   readonly providerList: ProviderListResponse;
   readonly agents: ReadonlyArray<Agent>;
+  readonly commands: ReadonlyArray<OpenCodeCommand>;
 }
 
 export interface ParsedOpenCodeModelSlug {
@@ -148,6 +150,14 @@ export interface OpenCodeRuntimeShape {
   readonly loadOpenCodeInventory: (
     client: OpencodeClient,
   ) => Effect.Effect<OpenCodeInventory, OpenCodeRuntimeError>;
+  /**
+   * Best-effort slash-command listing for a directory-scoped client.
+   * `GET /command` is unavailable on older servers; failures yield an
+   * empty list rather than an error.
+   */
+  readonly listOpenCodeCommands: (
+    client: OpencodeClient,
+  ) => Effect.Effect<ReadonlyArray<OpenCodeCommand>, never>;
   readonly loadInventoryFromCli: (input: {
     readonly binaryPath: string;
     readonly environment?: NodeJS.ProcessEnv;
@@ -649,10 +659,21 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       Effect.map((result) => result.data ?? []),
     );
 
-  const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
-    Effect.all([loadProviders(client), loadAgents(client)], { concurrency: "unbounded" }).pipe(
-      Effect.map(([providerList, agents]) => ({ providerList, agents })),
+  // Best-effort: `GET /command` is unavailable on older servers, and the
+  // model inventory must not fail because slash-command discovery did.
+  const loadCommands = (client: OpencodeClient) =>
+    runOpenCodeSdk("command.list", () => client.command.list()).pipe(
+      Effect.map((result) => result.data ?? []),
+      Effect.orElseSucceed((): ReadonlyArray<OpenCodeCommand> => []),
     );
+
+  const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
+    Effect.all([loadProviders(client), loadAgents(client), loadCommands(client)], {
+      concurrency: "unbounded",
+    }).pipe(Effect.map(([providerList, agents, commands]) => ({ providerList, agents, commands })));
+
+  const listOpenCodeCommands: OpenCodeRuntimeShape["listOpenCodeCommands"] = (client) =>
+    loadCommands(client);
 
   const loadInventoryFromCli: OpenCodeRuntimeShape["loadInventoryFromCli"] = (input) =>
     Effect.gen(function* () {
@@ -728,6 +749,10 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       return {
         providerList: { all: allProviders, default: {}, connected },
         agents,
+        // The CLI has no command-listing subcommand; local-mode slash
+        // commands are discovered by scanning markdown command files in the
+        // provider layer instead.
+        commands: [],
       };
     });
 
@@ -737,6 +762,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     runOpenCodeCommand,
     createOpenCodeSdkClient,
     loadOpenCodeInventory,
+    listOpenCodeCommands,
     loadInventoryFromCli,
   } satisfies OpenCodeRuntimeShape;
 });
