@@ -93,6 +93,23 @@ export const ServerProviderSkill = Schema.Struct({
 export type ServerProviderSkill = typeof ServerProviderSkill.Type;
 
 /**
+ * Project-scoped slash-command discovery. Provider snapshots carry
+ * server-level commands (built-ins, global config, and the probe cwd's
+ * project config), but project commands differ per working directory, so
+ * the composer asks for them separately with the thread's cwd.
+ */
+export const ProviderProjectSlashCommandsInput = Schema.Struct({
+  instanceId: ProviderInstanceId,
+  cwd: TrimmedNonEmptyString,
+});
+export type ProviderProjectSlashCommandsInput = typeof ProviderProjectSlashCommandsInput.Type;
+
+export const ProviderProjectSlashCommandsResult = Schema.Struct({
+  commands: Schema.Array(ServerProviderSlashCommand),
+});
+export type ProviderProjectSlashCommandsResult = typeof ProviderProjectSlashCommandsResult.Type;
+
+/**
  * Availability of a configured provider instance from the runtime's POV.
  *
  *  - `available` — the build ships this driver and an instance is wired

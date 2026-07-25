@@ -7,6 +7,7 @@ import { type VcsRefTarget } from "@t3tools/client-runtime/state/vcs";
 import type {
   EnvironmentId,
   OrchestrationThread,
+  ProviderInstanceId,
   ThreadId,
   VcsListRefsResult,
   VcsRef,
@@ -210,6 +211,31 @@ export function useComposerPathSearch(target: ComposerPathSearchTarget) {
     entries: result.data?.entries ?? [],
     error: result.error,
     isPending: normalizedTarget.query !== debouncedTarget.query || result.isPending,
+    refresh: result.refresh,
+  };
+}
+
+export function useProjectSlashCommands(target: {
+  readonly environmentId: EnvironmentId | null;
+  readonly instanceId: ProviderInstanceId | null;
+  readonly cwd: string | null;
+}) {
+  const result = useEnvironmentQuery(
+    target.environmentId !== null && target.instanceId !== null && target.cwd !== null
+      ? projectEnvironment.listProjectSlashCommands({
+          environmentId: target.environmentId,
+          input: {
+            instanceId: target.instanceId,
+            cwd: target.cwd,
+          },
+        })
+      : null,
+  );
+
+  return {
+    commands: result.data?.commands ?? [],
+    error: result.error,
+    isPending: result.isPending,
     refresh: result.refresh,
   };
 }

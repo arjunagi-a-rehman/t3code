@@ -3,8 +3,44 @@ import {
   normalizeSearchQuery,
   scoreQueryMatch,
 } from "@t3tools/shared/searchRanking";
+import type { ServerProviderSlashCommand } from "@t3tools/contracts";
 
 import type { ComposerCommandItem } from "./ComposerCommandMenu";
+
+/**
+ * Merge project-scoped commands (per-thread cwd) with the provider
+ * snapshot's server-level commands. Project commands come first so they win
+ * name clashes — matching OpenCode's project-over-global precedence — while
+ * a missing description or hint is filled in from the snapshot entry.
+ */
+export function mergeProjectSlashCommands(
+  projectCommands: ReadonlyArray<ServerProviderSlashCommand>,
+  snapshotCommands: ReadonlyArray<ServerProviderSlashCommand>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const merged = new Map<string, ServerProviderSlashCommand>();
+  for (const command of [...projectCommands, ...snapshotCommands]) {
+    const key = command.name.toLowerCase();
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, command);
+      continue;
+    }
+    merged.set(key, {
+      ...existing,
+      ...(existing.description
+        ? {}
+        : command.description
+          ? { description: command.description }
+          : {}),
+      ...(existing.input?.hint
+        ? {}
+        : command.input?.hint
+          ? { input: { hint: command.input.hint } }
+          : {}),
+    });
+  }
+  return [...merged.values()];
+}
 
 function scoreSlashCommandItem(
   item: Extract<ComposerCommandItem, { type: "slash-command" | "provider-slash-command" }>,
