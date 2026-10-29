@@ -72,6 +72,12 @@ export function createProjectEnvironmentAtoms<R, E>(
       staleTimeMs: 30_000,
       idleTtlMs: 5 * 60_000,
     }),
+    listProjectSlashCommands: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:projects:list-project-slash-commands",
+      tag: WS_METHODS.providersListProjectSlashCommands,
+      staleTimeMs: 60_000,
+      idleTtlMs: 5 * 60_000,
+    }),
     optimisticFile: (target: OptimisticProjectFileTarget) =>
       optimisticFileFamily(optimisticProjectFileKey(target)),
     create: createEnvironmentCommand(runtime, {

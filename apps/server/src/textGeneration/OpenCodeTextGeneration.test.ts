@@ -107,6 +107,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntime.OpenCodeRuntimeShape = {
         cause: null,
       }),
     ),
+  listOpenCodeCommands: () => Effect.succeed([]),
   loadInventoryFromCli: () =>
     Effect.fail(
       new OpenCodeRuntime.OpenCodeRuntimeError({

@@ -2,7 +2,41 @@ import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
 import type { ComposerCommandItem } from "./ComposerCommandMenu";
-import { searchSlashCommandItems } from "./composerSlashCommandSearch";
+import { mergeProjectSlashCommands, searchSlashCommandItems } from "./composerSlashCommandSearch";
+
+describe("mergeProjectSlashCommands", () => {
+  it("appends snapshot commands after project commands without duplicates", () => {
+    const merged = mergeProjectSlashCommands(
+      [{ name: "project-cmd", description: "Project command" }],
+      [
+        { name: "global-cmd", description: "Global command" },
+        { name: "init", description: "Built-in command" },
+      ],
+    );
+
+    expect(merged.map((command) => command.name)).toEqual(["project-cmd", "global-cmd", "init"]);
+  });
+
+  it("lets project commands win name clashes case-insensitively", () => {
+    const merged = mergeProjectSlashCommands(
+      [{ name: "Review", description: "Project review" }],
+      [{ name: "review", description: "Global review" }],
+    );
+
+    expect(merged).toEqual([{ name: "Review", description: "Project review" }]);
+  });
+
+  it("fills a missing project description and hint from the snapshot entry", () => {
+    const merged = mergeProjectSlashCommands(
+      [{ name: "review" }],
+      [{ name: "review", description: "Global review", input: { hint: "<path>" } }],
+    );
+
+    expect(merged).toEqual([
+      { name: "review", description: "Global review", input: { hint: "<path>" } },
+    ]);
+  });
+});
 
 describe("searchSlashCommandItems", () => {
   const claudeDriver = ProviderDriverKind.make("claudeAgent");
